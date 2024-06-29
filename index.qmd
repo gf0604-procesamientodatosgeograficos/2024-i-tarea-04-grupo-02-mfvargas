@@ -1,0 +1,233 @@
+---
+title: "Anfibios de Costa Rica"
+format: 
+  dashboard:
+    orientation: columns
+---
+
+
+```{r}
+#| label: carga-paquetes
+
+
+library(tidyverse)
+library(plotly)
+library(DT)
+library(sf)
+library(leaflet)
+```
+
+
+```{r}
+#| label: carga-datos
+#| warning: false
+#| message: false
+
+
+areas_conservacion <-
+  st_read(
+    "areas-conservacion.gpkg",
+    quiet = TRUE
+  )
+
+registros <-
+  st_read(
+    "registros-anfibios.csv",
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude",
+      "Y_POSSIBLE_NAMES=decimalLatitude"
+    ),
+    quiet = TRUE
+  )
+st_crs(registros) <- 4326
+
+especies <-
+  read_delim(
+    "especies-anfibios.csv"
+  )
+```
+
+# Cantidades de especies y registros de presencia en categorías de la Lista Roja
+
+## Column {width=45%}
+
+```{r}
+#| label: tabla-registros-x-categoria
+#| title: "Cantidad de registros de presencia por categoría de la Lista Roja"
+
+
+registros |>
+  st_drop_geometry() |>
+  left_join(especies, by = "species") |>
+  group_by(iucnRedListCategory) |>
+  summarize(n = n()) |>
+  replace_na(list(iucnRedListCategory = "Sin categoría")) |>
+  arrange(desc(n)) |>
+  datatable(
+    rownames = FALSE,
+    colnames = c("Categoría de la Lista Roja", "Cantidad de registros de presencia"),
+    options = list(
+      language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+    )
+  )
+```
+
+## Column {width=55%}
+
+```{r}
+#| label: grafico-especies-x-categoria-base-registros
+#| title: "Cantidad de especies en categorías CR, EN y VU de la Lista Roja (con base en los registros de presencia)"
+
+
+grafico_ggplot2 <-
+  registros |>
+  st_drop_geometry() |>
+  left_join(especies, by = "species") |>
+  filter(iucnRedListCategory == "CR" |
+           iucnRedListCategory == "EN" | iucnRedListCategory == "VU") |>
+  group_by(iucnRedListCategory) |>
+  summarize(n = n_distinct(species, na.rm = TRUE)) |>
+  ggplot(aes(x = reorder(iucnRedListCategory,-n),
+             y = n)) +
+  geom_col() +
+  xlab("Categoría") +
+  ylab("Cantidad de especies")
+
+ggplotly(grafico_ggplot2) |> config(locale = "es")
+```
+
+
+```{r}
+#| label: grafico-especies-x-categoria-base-especies
+#| title: "Cantidad de especies en categorías CR, EN y VU de la Lista Roja (con base en las especies)"
+#| eval: false
+
+
+grafico_ggplot2 <-
+  especies |>
+  filter(iucnRedListCategory == "CR" |
+           iucnRedListCategory == "EN" | iucnRedListCategory == "VU") |>
+  group_by(iucnRedListCategory) |>
+  summarize(n = n()) |>
+  ggplot(aes(x = reorder(iucnRedListCategory,-n),
+             y = n)) +
+  geom_col() +
+  xlab("Categoría") +
+  ylab("Cantidad de especies")
+
+ggplotly(grafico_ggplot2) |> config(locale = "es")
+```
+
+# Riqueza de especies en áreas de conservación
+
+```{r}
+#| label: union-registros-areas
+
+
+# Unión espacial de registros de presencia y áreas de conservación 
+# Esto agrega el identificador del área a los registros de presencia
+registros_union_areas <-
+  st_join(
+    x = registros,
+    y = select(areas_conservacion, codigo_ac),
+    join = st_within
+  )
+```
+
+
+```{r}
+#| label: conteo-especies-areas
+
+
+# Conteo de la riqueza (cantidad) de especies en áreas de conservación
+riqueza_especies_areas <-
+  registros_union_areas |>
+  st_drop_geometry() |>
+  group_by(codigo_ac) |>
+  summarize(riqueza_especies_anfibios = n_distinct(species, na.rm = TRUE))
+```
+
+
+```{r}
+#| label: union-areas-riqueza
+
+
+# Unión (no espacial) de áreas de conservación y riqueza de especies
+areas_union_riqueza <-
+  left_join(
+    x = areas_conservacion,
+    y = dplyr::select(riqueza_especies_areas, codigo_ac, riqueza_especies_anfibios),
+    by = "codigo_ac"
+  ) |>
+  replace_na(list(riqueza_especies_anfibios = 0))
+```
+
+## Column {width=55%}
+
+```{r}
+#| label: mapa-riqueza-especies-areas-conservacion
+#| title: "Riqueza de especies en áreas de conservación"
+
+
+# Paleta de colores de riqueza de especies
+colores_riqueza_especies <-
+  colorNumeric(
+    palette = "Reds",
+    domain = areas_union_riqueza$riqueza_especies_anfibios,
+    na.color = "transparent"
+  )
+
+# Mapa
+leaflet() |>
+  addTiles(group = "OSM") |>
+  addProviderTiles(providers$CartoDB.Positron, group = "Carto Positron") |>
+  addPolygons(
+    data = areas_union_riqueza,
+    fillColor = ~ colores_riqueza_especies(areas_union_riqueza$riqueza_especies_anfibios),
+    fillOpacity = 0.8,
+    color = "black",
+    popup = paste(
+      paste0("<strong>Área de conservación:</strong> ", areas_union_riqueza$nombre_ac),
+      paste0("<strong>Riqueza de especies:</strong> ", areas_union_riqueza$riqueza_especies_anfibios),
+      sep = "<br>"
+    ),
+    group = "Riqueza de especies"
+  ) |>
+  addLegend(
+    position = "bottomleft",
+    pal = colores_riqueza_especies,
+    values = areas_union_riqueza$riqueza_especies_anfibios,
+    group = "Riqueza de especies",
+    title = "Riqueza de especies"
+  ) |>
+  addLayersControl(
+    baseGroups = c(
+      "OSM", 
+      "Carto Positron"
+    ),
+    overlayGroups = c(
+      "Riqueza de especies"
+    )
+  )
+```
+
+## Column {width=45%}
+
+```{r}
+#| label: grafico-riqueza-especies-areas-conservacion
+#| title: "Riqueza de especies en áreas de conservación"
+
+
+grafico_ggplot2 <-
+  areas_union_riqueza |>
+  st_drop_geometry() |>
+  ggplot(aes(x = reorder(nombre_ac, riqueza_especies_anfibios),
+             y = riqueza_especies_anfibios)) +
+  geom_col() +
+  coord_flip() +
+  xlab("Área de conservación") +
+  ylab("Riqueza de especies")
+
+ggplotly(grafico_ggplot2) |> config(locale = "es")
+```
+
